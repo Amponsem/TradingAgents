@@ -27,6 +27,23 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
 
+# Models that have already failed a structured-output call. Local models served via
+# LM Studio / Ollama reliably ignore the JSON schema and return markdown, so the
+# structured call fails *every* time and we waste a full (often slow) generation on
+# it before falling back. Once a given model fails, we skip the structured attempt
+# for it from then on and go straight to free-text — the downstream parser
+# (runner._parse_pm_text) extracts the rating from the markdown either way. Keyed on
+# the model name so it persists across agents and runs within the process.
+_structured_disabled_models: set[str] = set()
+
+
+def _model_key(llm: Any) -> Optional[str]:
+    for attr in ("model_name", "model", "model_id"):
+        v = getattr(llm, attr, None)
+        if isinstance(v, str) and v:
+            return v
+    return None
+
 
 def bind_structured(llm: Any, schema: type[T], agent_name: str) -> Optional[Any]:
     """Return ``llm.with_structured_output(schema)`` or ``None`` if unsupported.
@@ -59,14 +76,21 @@ def invoke_structured_or_freetext(
     shape). The same value is forwarded to the free-text path so the
     fallback sees the same input the structured call did.
     """
-    if structured_llm is not None:
+    model_key = _model_key(plain_llm) or _model_key(structured_llm)
+    attempt_structured = structured_llm is not None and (
+        model_key is None or model_key not in _structured_disabled_models
+    )
+    if attempt_structured:
         try:
             result = structured_llm.invoke(prompt)
             return render(result)
         except Exception as exc:
+            if model_key:
+                _structured_disabled_models.add(model_key)
             logger.warning(
-                "%s: structured-output invocation failed (%s); retrying once as free text",
-                agent_name, exc,
+                "%s: structured-output invocation failed for model '%s' (%s); using "
+                "free text for this model from now on (skips the wasted retry)",
+                agent_name, model_key or "?", exc,
             )
 
     response = plain_llm.invoke(prompt)
