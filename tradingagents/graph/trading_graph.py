@@ -162,6 +162,17 @@ class TradingAgentsGraph:
         if temperature is not None and temperature != "":
             kwargs["temperature"] = float(temperature)
 
+        # Per-call request timeout + bounded retries are cross-provider: forward
+        # whenever set so a slow or stalled LLM call aborts instead of riding the
+        # caller's whole-run timeout (a single hung local-model call could
+        # otherwise block for tens of minutes).
+        timeout = self.config.get("timeout")
+        if timeout is not None and timeout != "":
+            kwargs["timeout"] = float(timeout)
+        max_retries = self.config.get("max_retries")
+        if max_retries is not None and max_retries != "":
+            kwargs["max_retries"] = int(max_retries)
+
         return kwargs
 
     def _create_tool_nodes(self) -> Dict[str, ToolNode]:
