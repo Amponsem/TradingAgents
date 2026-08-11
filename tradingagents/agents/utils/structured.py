@@ -28,6 +28,16 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
 
+# Schema-only structured output binds exactly one tool (the schema itself), so a
+# model that reaches for a search tool emits an unknown tool call and the whole
+# structured attempt is discarded for a free-text retry. Agents on this path
+# state the constraint explicitly rather than relying on the binding alone
+# (#1130).
+NO_EXTERNAL_TOOLS = (
+    "Use only the evidence provided in this prompt. Do not call external tools "
+    "or search the web; if something is missing, say so explicitly."
+)
+
 # Models that have already failed a structured-output call. Local models served via
 # LM Studio / Ollama reliably ignore the JSON schema and return markdown, so the
 # structured call fails *every* time and we waste a full (often slow) generation on
@@ -84,6 +94,11 @@ def invoke_structured_or_freetext(
     if attempt_structured:
         try:
             result = structured_llm.invoke(prompt)
+            if result is None:
+                # A thinking model can answer in plain text instead of calling
+                # the tool, leaving the parser with nothing to return. Treat it
+                # as a structured miss and fall back, with a clear reason.
+                raise ValueError("structured output returned no parsed result")
             return render(result)
         except Exception as exc:
             if model_key:
