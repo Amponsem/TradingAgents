@@ -8,6 +8,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_news,
     get_prediction_markets,
 )
+from tradingagents.agents.utils.structured import invoke_analyst_with_tools
 
 
 def create_news_analyst(llm):
@@ -53,8 +54,8 @@ def create_news_analyst(llm):
         prompt = prompt.partial(current_date=current_date)
         prompt = prompt.partial(instrument_context=instrument_context)
 
-        chain = prompt | llm.bind_tools(tools)
-        result = chain.invoke(state["messages"])
+        result = invoke_analyst_with_tools(
+            prompt, llm, tools, state["messages"], "News Analyst")
 
         report = ""
 

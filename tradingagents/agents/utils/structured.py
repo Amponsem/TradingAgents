@@ -19,14 +19,20 @@ all three agents log the same warnings when fallback fires.
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Callable
-from typing import Any, TypeVar
+from typing import Any, Optional, TypeVar
 
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
+
+# How many extra times to re-attempt a tool-bound analyst call before dropping tools.
+# The tool-format failures on weak local models are stochastic, so a re-sample usually
+# succeeds and preserves real data access. Env-overridable; 2 retries = up to 3 tries.
+_TOOL_CALL_RETRIES = int(os.environ.get("TA_TOOL_CALL_RETRIES", "2"))
 
 # Schema-only structured output binds exactly one tool (the schema itself), so a
 # model that reaches for a search tool emits an unknown tool call and the whole
@@ -111,3 +117,43 @@ def invoke_structured_or_freetext(
 
     response = plain_llm.invoke(prompt)
     return response.content
+
+
+def invoke_analyst_with_tools(
+    prompt: Any,
+    llm: Any,
+    tools: list,
+    messages: Any,
+    agent_name: str,
+) -> Any:
+    """Invoke an analyst's tool-bound chain resiliently and return the AIMessage.
+
+    Data-fetching analysts (market/news/fundamentals) bind their tools and let the
+    model decide which to call. Weak local models served via LM Studio (e.g. gemma
+    finetunes) intermittently emit a tool call the server cannot parse — LM Studio
+    then 400s with "...does not match the expected peg-gemma4 format". A 400 is not
+    retried by the OpenAI SDK, so a single such miss at any analyst node aborts the
+    entire multi-agent run (every ticker comes back "Hold (failed)").
+
+    The failure is stochastic, not deterministic (the same model succeeds on most
+    tickers), so we simply re-sample the tool-bound call a couple of times; a retry
+    usually parses cleanly and preserves real data access. Only if every attempt
+    fails do we drop the tools and take a plain free-text pass, so the graph still
+    advances (with a thinner, data-light report) instead of the run dying outright.
+    """
+    tool_chain = prompt | llm.bind_tools(tools)
+    last_exc: Optional[Exception] = None
+    for attempt in range(_TOOL_CALL_RETRIES + 1):
+        try:
+            return tool_chain.invoke(messages)
+        except Exception as exc:  # noqa: BLE001 — keep the run alive; see docstring
+            last_exc = exc
+            logger.warning(
+                "%s: tool-bound invocation failed (attempt %d/%d): %s",
+                agent_name, attempt + 1, _TOOL_CALL_RETRIES + 1, exc,
+            )
+    logger.warning(
+        "%s: dropping tools after %d failed attempts — free-text pass so the run "
+        "continues (last error: %s)", agent_name, _TOOL_CALL_RETRIES + 1, last_exc,
+    )
+    return (prompt | llm).invoke(messages)
